@@ -4,6 +4,7 @@
 #include <deal.II/lac/vector.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
 #include <deal.II/lac/sparse_matrix.h>
+#include <deal.II/lac/sparse_direct.h>
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
 #include <deal.II/grid/grid_out.h>
@@ -71,13 +72,17 @@ class InviscidBurgersDG
         void setup_system();
         void assemble_system();
         void solve();
+        void output();
         double burgers_flux(double u);
         double numerical_flux (double u_plus, double u_minus, double lambda);
     
-    // Systems components
+    // Systems components and data
     Triangulation<dim+1>    triangulation;
     FE_DGQ<dim+1>           fe;
     DoFHandler<dim+1>       dof_handler;
+    SparsityPattern sparsity_pattern;
+    SparseMatrix<double> system_matrix;
+    Vector<double> solution;
 
     // System parameters
     const double x_min, x_max;      // 1D spatial interval
@@ -125,11 +130,41 @@ void InviscidBurgersDG<dim>::make_grid()
     GridGenerator::subdivided_hyper_rectangle(triangulation, repetitions, p1, p2, colorized);
 }
 
+// setup_sysem() identical to Step 12 tutorial
 template <int dim>
 void InviscidBurgersDG<dim>::setup_system()
 {
+    dof_handler.distribute_dofs(fe);
+
+    DynamicSparsityPattern dsp(dof_handler.n_dofs());
+    DoFTools::make_flux_sparsity_pattern(dof_handler, dsp);
+    sparsity_pattern.copy_from(dsp);
+
+    system_matrix.reinit(sparsity_pattern);
+    solution.reinit(dof_handler.n_dofs());
+    right_hand_side.reinit(dof_handler.n_dofs());
 
 }
+
+// Using UMFPACK here since this seems like a small-sized problem
+// Although another implementation of SolverGMRES will be worked on just in case
+template<int dim>
+void InviscidBurgersDG<dim>::solve()
+{
+    SparseDirectUMFPACK direct_solver;
+    direct_solver.initialize(system_matrix);
+
+
+    
+}
+/*
+template<int dim>
+void InviscidBurgersDG<dim>::solve()
+{
+    
+}
+*/
+
 
 template <int dim>
 void InviscidBurgersDG<dim>::assemble_system()
@@ -149,8 +184,50 @@ double InviscidBurgersDG<dim>::numerical_flux(double u_plus, double u_minus, dou
     return 0.5*(burgers_flux(u_minus) + burgers_flux(u_plus) - lambda*(u_plus - u_minus));
 }
 
-int main()
+template <int dim>
+void InviscidBurgersDG<dim>::output()
+{
+    DataOut<dim+1> data_out;    
+}
+
+template <int dim>
+void InviscidBurgersDG<dim>::run()
 {
 
+}
+
+
+int main()
+{
+    // Essentially the same template as any deal.II main()
+    try
+    {
+        const unsigned int degree = 1;
+        InviscidBurgersDG<1> iv_burgers(degree);
+        iv_burgers.run();
+    }
+    catch (std::exception &exc)
+    {
+        std::cerr << std::endl << std::endl
+            << "----------------------------------------------------"
+            << std::endl;
+        std::cerr << "Exception on processing: " << std::endl
+            << exc.what() << std::endl
+            << "Aborting!" << std::endl
+            << "----------------------------------------------------"
+            << std::endl;
+        return 1;
+    }
+    catch (...)
+    {
+        std::cerr << std::endl << std::endl
+            << "----------------------------------------------------"
+            << std::endl;
+        std::cerr << "Unknown exception!" << std::endl
+            << "Aborting!" << std::endl
+            << "----------------------------------------------------"
+            << std::endl;
+        return 1;
+    }
     return 0;
 }

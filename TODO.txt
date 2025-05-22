@@ -3,5 +3,6 @@ Finish:
     assemble_system()
     solve()
     run()
+    ** Be sure to incorporate ICs and BCs to the solver
 
 After getting these sorted look into CMake and compile the file
