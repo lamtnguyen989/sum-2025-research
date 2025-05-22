@@ -1,0 +1,7 @@
+Finish:
+    setup_system()
+    assemble_system()
+    solve()
+    run()
+
+After getting these sorted look into CMake and compile the file
