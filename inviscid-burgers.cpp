@@ -60,7 +60,9 @@ class BoundaryCondition : public Function<dim>
 };
 
 
-/* ----------------------------------------------------------------------------------------------- */
+/* 
+    Inviscid Burgers solver using Discontinuous Galerkin (DG) method
+ */
 template <int dim>
 class InviscidBurgersDG
 {
@@ -75,14 +77,16 @@ class InviscidBurgersDG
         void output();
         double burgers_flux(double u);
         double numerical_flux (double u_plus, double u_minus, double lambda);
+        void initial_condition();
     
     // Systems components and data
     Triangulation<dim+1>    triangulation;
     FE_DGQ<dim+1>           fe;
     DoFHandler<dim+1>       dof_handler;
-    SparsityPattern sparsity_pattern;
-    SparseMatrix<double> system_matrix;
-    Vector<double> solution;
+    SparsityPattern         sparsity_pattern;
+    SparseMatrix<double>    jacobian;
+    Vector<double>          residual;
+    Vector<double>          solution;
 
     // System parameters
     const double x_min, x_max;      // 1D spatial interval
@@ -94,6 +98,7 @@ class InviscidBurgersDG
 };
 
 
+// Constructor
 template <int dim>
 InviscidBurgersDG<dim>::InviscidBurgersDG(const unsigned int deg):
     degree(deg),
@@ -106,8 +111,37 @@ InviscidBurgersDG<dim>::InviscidBurgersDG(const unsigned int deg):
     current_time = 0.0
 {}
 
+/*
+    Flux calculations
+*/
+template <int dim>
+double InviscidBurgersDG<dim>::burgers_flux(double u)
+{
+    return 0.5*(u * u);
+}
 
-// GridGenerator::subdivided_hyper_rectangle
+template <int dim>
+double InviscidBurgersDG<dim>::numerical_flux(double u_plus, double u_minus, double lambda)
+{
+    return 0.5*(burgers_flux(u_minus) + burgers_flux(u_plus) - lambda*(u_plus - u_minus));
+}
+/*
+    Initial condition
+*/
+template <int dim>
+void InviscidBurgersDG<dim>::initial_condition()
+{
+    AffineConstraints constraints;
+    VectorTools::project(dof_handler,
+                        constraints,
+                        QGauss<dim+1>(degree+2),
+                        InitialCondition<dim+1>(),
+                        solution);
+}
+
+/*
+    Making the grid with GridGenerator::subdivided_hyper_rectangle
+*/
 template <int dim>
 void InviscidBurgersDG<dim>::make_grid()
 {
@@ -126,7 +160,7 @@ void InviscidBurgersDG<dim>::make_grid()
     p2[1] = t_max;
 
     // Setting up subdivided_hyper_rectangle grid 
-    bool colorized = false; // Colorized param (default=false)
+    bool colorized = false; // Colorized param
     GridGenerator::subdivided_hyper_rectangle(triangulation, repetitions, p1, p2, colorized);
 }
 
@@ -146,48 +180,73 @@ void InviscidBurgersDG<dim>::setup_system()
 
 }
 
-// Using UMFPACK here since this seems like a small-sized problem
-// Although another implementation of SolverGMRES will be worked on just in case
-template<int dim>
-void InviscidBurgersDG<dim>::solve()
-{
-    SparseDirectUMFPACK direct_solver;
-    direct_solver.initialize(system_matrix);
-
-
-    
-}
 /*
-template<int dim>
-void InviscidBurgersDG<dim>::solve()
-{
-    
-}
+    Assembling the Jacobian
 */
-
-
 template <int dim>
 void InviscidBurgersDG<dim>::assemble_system()
 {
+    // Interior Finite Element
+    const QGauss<dim+1> &quadrature(degree+1);
+    const UpdateFlags quadrature_update = update_values | update_gradients |
+                                        update_quadrature_points | update_JxW_values;
+    FEValues<dim+1> fe_value(fe, quadrature, quadrature_update);
 
+    // Face (boundary) Finite Element
+    const QGauss<dim> &face_quadrature(degree+1);
+    const UpdateFlags quadrature_update = update_values | update_gradients | update_normal_vectors |
+                                        update_quadrature_points | update_JxW_values;
+    FEFaceValues<dim+1> face_fe_value(fe, quadrature, quadrature_update);
+
+
+    // Assembling Jacobian (by hand to get the feeling, MeshWorker in the future tho)
+    const unsigned int dofs_per_cell = fe.dofs_per_cell;
+    const unsigned int n_q_points = quadrature.size();
+    const unsigned int face_n_q_points = face_quadrature.size();
+
+    FullMatrix<double> cell_jacobian(dofs_per_cell, dofs_per_cell);
+    Vector<double> cell_residual(dofs_per_cell);
+    BoundaryCondition<dim> BC;  // Initializing BC object for potential use
+
+    // Zero out Jacobian and residual before going through the mesh
+    jacobian = 0;
+    residual = 0;
+    
+    for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+        fe_values.reinit(cell);
+        cell_jacobian = 0;
+        cell_residual = 0;
+
+        // Modified step 55 to work with scalar values
+        std::vector<double> solution_values(n_q_points);
+        fe_values.get_function_values(solution, solution_values);
+
+        // Volume integrals
+        for (int k=0; k < n_q_points; k++)
+        {
+
+        }
+
+        // Face integrals
+        for (int i=0; i < GeometryInfo<dim+1>::faces_per_cell; i++)
+        {
+
+        }
+    }
 }
 
-template <int dim>
-double InviscidBurgersDG<dim>::burgers_flux(double u)
+// Solve
+template<int dim>
+void InviscidBurgersDG<dim>::solve()
 {
-    return 0.5*(u * u);
-}
-
-template <int dim>
-double InviscidBurgersDG<dim>::numerical_flux(double u_plus, double u_minus, double lambda)
-{
-    return 0.5*(burgers_flux(u_minus) + burgers_flux(u_plus) - lambda*(u_plus - u_minus));
+    
 }
 
 template <int dim>
 void InviscidBurgersDG<dim>::output()
 {
-    DataOut<dim+1> data_out;    
+
 }
 
 template <int dim>
@@ -199,7 +258,6 @@ void InviscidBurgersDG<dim>::run()
 
 int main()
 {
-    // Essentially the same template as any deal.II main()
     try
     {
         const unsigned int degree = 1;

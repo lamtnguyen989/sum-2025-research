@@ -6,3 +6,7 @@ Finish:
     ** Be sure to incorporate ICs and BCs to the solver
 
 After getting these sorted look into CMake and compile the file
+
+URGENT:
+    Follow Step 12 of deal.II
+    Read up on Finite Elements and Discontinuous Galerkin
