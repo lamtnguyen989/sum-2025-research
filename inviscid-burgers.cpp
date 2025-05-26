@@ -59,6 +59,68 @@ class BoundaryCondition : public Function<dim>
         }
 };
 
+/*
+    Structs for MeshWorker
+*/
+template<int spacetime_dim>     // Note that spacetime_dim is essentially dim+1
+struct ScratchData
+{
+    // Data fields (Finite Elements)
+    FEValues<spacetime_dim>             fe_values;
+    FEInterfaceValues<spacetime_dim>    fe_face_values;  
+
+    // Default constructor
+    ScratchData(const MappingQ1<spacetime_dim> &mapping,
+                const FiniteElement<spacetime_dim> &fe,
+                const Quadrature<spacetime_dim> &quadrature,
+                const Quadrature<spacetime_dim - 1> &face_quadrature,
+                const UpdateFlags update_flags = update_values | update_gradients |
+                                                update_quadrature_points | update_JxW_values,
+                const UpdateFlags face_update_flags = update_values | update_gradients | update_normal_vectors |
+                                                    update_quadrature_points | update_JxW_values):
+        fe_values(mapping, fe, quadrature, update_flags),
+        fe_face_values(mapping, fe, face_quadrature, face_update_flags)
+    {}
+    
+    // Copy constructor (needed for MeshWorker)
+    ScratchData(const ScratchData<spacetime_dim> &scratch_data):
+
+        fe_values(scratch_data.fe_values.get_mapping(),
+                scratch_data.fe_values.get_fe(),
+                scratch_data.fe_values.get_quadrature(),
+                scratch_data.fe_values.get_update_flags()),
+        fe_face_values(scratch_data.fe_values.get_mapping(),
+                    scratch_data.fe_values.get_fe(),
+                    scratch_data.fe_values.get_quadrature(),
+                    scratch_data.fe_values.get_update_flags()),
+    {}
+};
+
+
+struct CopyDataFace
+{
+    FullMatrix<double>                      cell_matrix;
+    std::vector<types::global_dof_index>    joint_dof_indices;
+};
+
+
+struct CopyData
+{
+    FullMatrix<double>                      cell_matrix;
+    Vector<double>                          cell_residual;
+    std::vector<types::global_dof_index>    local_dof_indices;
+    std::vector<CopyDataFace>               face_data;
+
+    template<class Iterator>
+    void reinit(const Iterator &cell, unsigned int dofs_per_cell)
+    {
+        cell_matrix.reinit(dofs_per_cell, dofs_per_cell);
+        cell_residual.reinit(dofs_per_cell);
+
+        local_dof_indices.resize(dofs_per_cell);
+        cell->get_dof_indices(local_dof_indices);
+    }
+};
 
 /* 
     Inviscid Burgers solver using Discontinuous Galerkin (DG) method
@@ -67,17 +129,17 @@ template <int dim>
 class InviscidBurgersDG
 {
     public:
-        InviscidBurgersDG(const unsigned int deg);
+        InviscidBurgersDG(unsigned int deg);
         void run();
     private:
         void make_grid();
         void setup_system();
         void assemble_system();
         void solve();
-        void output();
-        double burgers_flux(double u);
-        double numerical_flux (double u_plus, double u_minus, double lambda);
+        void output_data();
         void initial_condition();
+        double burgers_flux(double u);
+        double numerical_flux (double u_plus, double u_minus);
     
     // Systems components and data
     Triangulation<dim+1>    triangulation;
@@ -87,6 +149,7 @@ class InviscidBurgersDG
     SparseMatrix<double>    jacobian;
     Vector<double>          residual;
     Vector<double>          solution;
+    const MappingQ1<dim>    mapping;
 
     // System parameters
     const double x_min, x_max;      // 1D spatial interval
@@ -100,15 +163,15 @@ class InviscidBurgersDG
 
 // Constructor
 template <int dim>
-InviscidBurgersDG<dim>::InviscidBurgersDG(const unsigned int deg):
+InviscidBurgersDG<dim>::InviscidBurgersDG(unsigned int deg):
     degree(deg),
     fe(degree),
     dof_handler(triangulation),
-    x_min = -1.0 , x_max = 1.0,
-    t_min = 0.0 , t_max = 1.0,
-    spatial_cells = 64,
-    time_cells = 32,
-    current_time = 0.0
+    x_min(-1.0) , x_max(1.0),
+    t_min(0.0) , t_max(1.0),
+    spatial_cells(64),
+    time_cells(32),
+    current_time(0.0)
 {}
 
 /*
@@ -121,17 +184,21 @@ double InviscidBurgersDG<dim>::burgers_flux(double u)
 }
 
 template <int dim>
-double InviscidBurgersDG<dim>::numerical_flux(double u_plus, double u_minus, double lambda)
+double InviscidBurgersDG<dim>::numerical_flux(double u_plus, double u_minus)
 {
+    double lambda = std::max(std::abs(u_plus), std::abs(u_minus));
     return 0.5*(burgers_flux(u_minus) + burgers_flux(u_plus) - lambda*(u_plus - u_minus));
 }
+
 /*
-    Initial condition
+    Initial condition for Burgers
 */
 template <int dim>
 void InviscidBurgersDG<dim>::initial_condition()
 {
-    AffineConstraints constraints;
+    AffineConstraints constraints;  // Empty constraints
+
+    // Projecting the initial condition 
     VectorTools::project(dof_handler,
                         constraints,
                         QGauss<dim+1>(degree+2),
@@ -174,10 +241,9 @@ void InviscidBurgersDG<dim>::setup_system()
     DoFTools::make_flux_sparsity_pattern(dof_handler, dsp);
     sparsity_pattern.copy_from(dsp);
 
-    system_matrix.reinit(sparsity_pattern);
+    jacobian.reinit(sparsity_pattern);
     solution.reinit(dof_handler.n_dofs());
-    right_hand_side.reinit(dof_handler.n_dofs());
-
+    residual.reinit(dof_handler.n_dofs());
 }
 
 /*
@@ -186,54 +252,7 @@ void InviscidBurgersDG<dim>::setup_system()
 template <int dim>
 void InviscidBurgersDG<dim>::assemble_system()
 {
-    // Interior Finite Element
-    const QGauss<dim+1> &quadrature(degree+1);
-    const UpdateFlags quadrature_update = update_values | update_gradients |
-                                        update_quadrature_points | update_JxW_values;
-    FEValues<dim+1> fe_value(fe, quadrature, quadrature_update);
 
-    // Face (boundary) Finite Element
-    const QGauss<dim> &face_quadrature(degree+1);
-    const UpdateFlags quadrature_update = update_values | update_gradients | update_normal_vectors |
-                                        update_quadrature_points | update_JxW_values;
-    FEFaceValues<dim+1> face_fe_value(fe, quadrature, quadrature_update);
-
-
-    // Assembling Jacobian (by hand to get the feeling, MeshWorker in the future tho)
-    const unsigned int dofs_per_cell = fe.dofs_per_cell;
-    const unsigned int n_q_points = quadrature.size();
-    const unsigned int face_n_q_points = face_quadrature.size();
-
-    FullMatrix<double> cell_jacobian(dofs_per_cell, dofs_per_cell);
-    Vector<double> cell_residual(dofs_per_cell);
-    BoundaryCondition<dim> BC;  // Initializing BC object for potential use
-
-    // Zero out Jacobian and residual before going through the mesh
-    jacobian = 0;
-    residual = 0;
-    
-    for (const auto &cell : dof_handler.active_cell_iterators())
-    {
-        fe_values.reinit(cell);
-        cell_jacobian = 0;
-        cell_residual = 0;
-
-        // Modified step 55 to work with scalar values
-        std::vector<double> solution_values(n_q_points);
-        fe_values.get_function_values(solution, solution_values);
-
-        // Volume integrals
-        for (int k=0; k < n_q_points; k++)
-        {
-
-        }
-
-        // Face integrals
-        for (int i=0; i < GeometryInfo<dim+1>::faces_per_cell; i++)
-        {
-
-        }
-    }
 }
 
 // Solve
@@ -244,7 +263,7 @@ void InviscidBurgersDG<dim>::solve()
 }
 
 template <int dim>
-void InviscidBurgersDG<dim>::output()
+void InviscidBurgersDG<dim>::output_data()
 {
 
 }
@@ -255,14 +274,16 @@ void InviscidBurgersDG<dim>::run()
 
 }
 
-
+/*
+    main()
+*/
 int main()
 {
     try
     {
         const unsigned int degree = 1;
-        InviscidBurgersDG<1> iv_burgers(degree);
-        iv_burgers.run();
+        InviscidBurgersDG<1> ivBurgersDG(degree);
+        ivBurgersDG.run();
     }
     catch (std::exception &exc)
     {
