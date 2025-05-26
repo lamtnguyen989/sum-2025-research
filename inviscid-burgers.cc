@@ -47,7 +47,9 @@ class InitialCondition : public Function<dim>
 };
 
 /*
-    Define the Dirichlet Boundary Condition on spatial interval [a,b] as u(a,t) = u(b,t) = 0
+    Define the BoundaryValues of the rectangular grid [a,b] x [0,T]:
+        - Initial Condition: sin(pi * x)
+        - Boundary condition (Dirichlet): u(a,t) = u(b,t) = 0
 */
 template <int dim>
 class BoundaryValues : public Function<dim>
@@ -56,7 +58,20 @@ class BoundaryValues : public Function<dim>
         BoundaryValues() : Function<dim>() {};
         virtual double value(const Point<dim> &p, const unsigned int component) const override
         {
-            // TODO
+            const double epsilon = 1e-10;   // Error needed to be consider a boundary point
+            // Boundary condtion 
+            if (std::abs(p[0] - 1.0) < epsilon || std::abs(p[0] + 1.0) < epsilon)
+            {
+                return 0.0;
+            }
+            
+            // Initial condition
+            if (std::abs(p[1]) < epsilon)
+            {
+                return std::sin(numbers::PI * p[0]);
+            }
+
+            // These should never be call for points outside of the boundary (the below line should never run)
             return 0.0;
         }
 };
@@ -274,7 +289,7 @@ void InviscidBurgersDG<dim>::assemble_system()
         const auto &q_points = scratch_data.fe_values.get_quadrature_points();
         const FEValues<dim+1> &fe_v = scratch_data.fe_values;
         
-        // dx terms
+        // volume terms
         const std::vector<double> &JxW  = fe_v.get_JxW_values();
 
         // Get the u-values (solution) for the flux calculations
@@ -289,10 +304,10 @@ void InviscidBurgersDG<dim>::assemble_system()
             {
                 for (int j = 0; j < n_dofs; j++)
                 {
-                    // Integrand: v * ∂u/∂t *dx
+                    // Integrand: v * ∂u/∂t * dxdt
                     copy_data.cell_matrix(i,j) += fe_v.shape_value(i,p) * fe_v.shape_grad(i,p)[1] * JxW[p];
 
-                    // Integrand: - (1/2*u^2 * ∂u/∂x * dx)
+                    // Integrand: - (1/2*u^2 * ∂u/∂x * dxdt)
                     copy_data.cell_matrix(i,j) -= 0.5*burgers_flux(u_values[p]) * fe_v.shape_grad(i,p)[0] * JxW[p];
                 }
             }
@@ -307,20 +322,80 @@ void InviscidBurgersDG<dim>::assemble_system()
         scratch_data.fe_interface_values.reinit(cell, face_num);
         const FEFaceValues<dim+1> &fe_face = scratch_data.fe_face_values;
 
+        const auto &q_points = fe_face.get_quadrature_points();
+        const unsigned int n_facet_dofs = fe_face.get_fe().n_dofs_per_cell();
+        const std::vector<double> &JxW = fe_face.get_fe().n_dofs_per_cell();
+
+        // u-values
+        unsigned int n_q_pts = fe_face.n_quadrature_points();
+        std::vector<double> u_values(n_q_pts);
+        fe_face.get_function_values(solution, u_values);
+
+        // Handling boundary points (TODO)
+        for (unsigned int p = 0; p < q_points.size(); p++)
+        {
+            // Applying the BC/IC
+            double boundary_value = boundary_function.value(q_points[p]);
+
+            // Get the coordinate and normal vector of the point
+            const Point<dim+1> pt = fe_face.quadrature_point(p);  
+            const Tensor<1, dim+1> normal = fe_face.normal_vector(p);
+
+            // Integrating the residual at the boundary
+            double flux = numerical_flux(u_values[p], boundary_value);
+            for (int i = 0; i < n_facet_dofs; i++)
+            {
+                for (int j = 0; j < n_facet_dofs; j++)
+                {
+                    // Integrand: v * numericalflux(u_plus, u_minus) * ds
+                    copy_data.cell_matrix(i,j) += fe_face.shape_value(i,p) * numerical_flux(fe_face.shape_value(j,p), boundary_value) * JxW[p];
+                }
+            }
+        }
     };
 
     // Face worker
-    const auto face_worker = [&]()
+    const auto face_worker = [&](const Iterator     &cell,
+                                 const unsigned int &f,
+                                 const unsigned int &sf,
+                                 const Iterator     &ncell,
+                                 const unsigned int &nf,
+                                 const unsigned int &nsf,
+                                 ScratchData<dim>   &scratch_data,
+                                 CopyData           &copy_data)
     {
         // TODO
     };
 
     // Copier
-    const auto copier = [&](const CopyData &copy_data)
+    const AffineConstraints<double> constraints;
+    const auto copier = [&](const CopyData &c)
     {
-        // TODO
+        constraints.distribute_local_to_global(c.cell_matrix,
+                                            c.cell_residual,
+                                            c.local_dof_indices,
+                                            system_matrix,
+                                            residual);
+        for (const auto &cdf : c.face_data)
+        {
+            constraints.distribute_local_to_global(cdf.cell_matrix,
+                                                cdf.joint_dof_indices,
+                                                system_matrix);
+        }
     };
 
+    // MeshWorker Loop
+    ScratchData<dim+1>  scratch_data(mapping, fe, quadrature, face_quadrature);
+    CopyData            copy_data;
+    MeshWorker::mesh_loop(dof_handler.begin_active(), 
+                        dof_handler.end(), 
+                        cell_worker,
+                        copier,
+                        scratch_data,
+                        copy_data,
+                        MeshWorker::assemble_own_cells | MeshWorker::assemble_boundary_faces |MeshWorker::assemble_own_interior_faces_once,
+                        boundary_worker,
+                        face_worker);
 }
 
 // Solve
