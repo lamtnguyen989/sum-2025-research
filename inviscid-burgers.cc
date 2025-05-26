@@ -39,7 +39,8 @@ class InitialCondition : public Function<dim>
 {
     public:
         InitialCondition() : Function<dim>() {};
-        virtual void value(const Point<dim> &p, const unsigned int component = 0) const override
+
+        virtual double value(const Point<dim> &p, const unsigned int component = 0) const override
         {
             return std::sin(numbers::PI * p[0]);
         }
@@ -49,12 +50,13 @@ class InitialCondition : public Function<dim>
     Define the Dirichlet Boundary Condition on spatial interval [a,b] as u(a,t) = u(b,t) = 0
 */
 template <int dim>
-class BoundaryCondition : public Function<dim>
+class BoundaryValues : public Function<dim>
 {
     public:
-        BoundaryCondition() : Function<dim>() {};
-        virtual void value(const Point<dim> &p, const unsigned int component) const override
+        BoundaryValues() : Function<dim>() {};
+        virtual double value(const Point<dim> &p, const unsigned int component) const override
         {
+            // TODO
             return 0.0;
         }
 };
@@ -83,16 +85,15 @@ struct ScratchData
     {}
     
     // Copy constructor (needed for MeshWorker)
-    ScratchData(const ScratchData<spacetime_dim> &scratch_data):
-
-        fe_values(scratch_data.fe_values.get_mapping(),
+    ScratchData(const ScratchData<spacetime_dim> &scratch_data)
+        : fe_values(scratch_data.fe_values.get_mapping(),
                 scratch_data.fe_values.get_fe(),
                 scratch_data.fe_values.get_quadrature(),
-                scratch_data.fe_values.get_update_flags()),
-        fe_face_values(scratch_data.fe_values.get_mapping(),
+                scratch_data.fe_values.get_update_flags())
+        , fe_face_values(scratch_data.fe_values.get_mapping(),
                     scratch_data.fe_values.get_fe(),
                     scratch_data.fe_values.get_quadrature(),
-                    scratch_data.fe_values.get_update_flags()),
+                    scratch_data.fe_values.get_update_flags())
     {}
 };
 
@@ -143,13 +144,16 @@ class InviscidBurgersDG
     
     // Systems components and data
     Triangulation<dim+1>    triangulation;
-    FE_DGQ<dim+1>           fe;
+    const FE_DGQ<dim+1>     fe;
+    const MappingQ1<dim+1>  mapping;
+    const QGauss<dim+1>     quadrature;
+    const QGauss<dim>       face_quadrature;
     DoFHandler<dim+1>       dof_handler;
     SparsityPattern         sparsity_pattern;
-    SparseMatrix<double>    jacobian;
-    Vector<double>          residual;
+    SparseMatrix<double>    system_matrix;
+    Vector<double>          residual;   // right_hand_side for many code in the tutorials
     Vector<double>          solution;
-    const MappingQ1<dim>    mapping;
+
 
     // System parameters
     const double x_min, x_max;      // 1D spatial interval
@@ -171,7 +175,9 @@ InviscidBurgersDG<dim>::InviscidBurgersDG(unsigned int deg):
     t_min(0.0) , t_max(1.0),
     spatial_cells(64),
     time_cells(32),
-    current_time(0.0)
+    current_time(0.0),
+    quadrature(fe.tensor_degree() + 1),
+    face_quadrature(fe.tensor_degree() + 1)
 {}
 
 /*
@@ -206,6 +212,7 @@ void InviscidBurgersDG<dim>::initial_condition()
                         solution);
 }
 
+
 /*
     Making the grid with GridGenerator::subdivided_hyper_rectangle
 */
@@ -231,7 +238,9 @@ void InviscidBurgersDG<dim>::make_grid()
     GridGenerator::subdivided_hyper_rectangle(triangulation, repetitions, p1, p2, colorized);
 }
 
-// setup_sysem() identical to Step 12 tutorial
+/*
+    setup_sysem() identical to Step 12 tutorial
+*/
 template <int dim>
 void InviscidBurgersDG<dim>::setup_system()
 {
@@ -241,17 +250,76 @@ void InviscidBurgersDG<dim>::setup_system()
     DoFTools::make_flux_sparsity_pattern(dof_handler, dsp);
     sparsity_pattern.copy_from(dsp);
 
-    jacobian.reinit(sparsity_pattern);
+    system_matrix.reinit(sparsity_pattern);
     solution.reinit(dof_handler.n_dofs());
     residual.reinit(dof_handler.n_dofs());
 }
 
 /*
-    Assembling the Jacobian
+    Assembling the system matrix
 */
 template <int dim>
 void InviscidBurgersDG<dim>::assemble_system()
 {
+    using Iterator = typename DoFHandler<dim>::active_cell_iterator;
+    const BoundaryValues<dim> boundary_function;
+
+    // Cell worker
+    const auto cell_worker = [&](const Iterator &cell, ScratchData<dim+1> &scratch_data, CopyData &copy_data)
+    {
+        const unsigned int n_dofs = scratch_data.fe_values.get_fe().n_dofs_per_cell();
+        copy_data.reinit(cell, n_dofs);
+        scratch_data.fe_values.reinit(cell);
+
+        const auto &q_points = scratch_data.fe_values.get_quadrature_points();
+        const FEValues<dim+1> &fe_v = scratch_data.fe_values;
+        
+        // dx terms
+        const std::vector<double> &JxW  = fe_v.get_JxW_values();
+
+        // Get the u-values (solution) for the flux calculations
+        unsigned int n_q_pts = fe_v.n_quadrature_points;
+        std::vector<double> u_values(n_q_pts);
+        fe_v.get_function_values(solution, u_values);
+
+        // Integrate over volume cells
+        for (unsigned int p = 0; p < n_q_pts; p++)
+        {
+            for (int i = 0; i < n_dofs; i++)
+            {
+                for (int j = 0; j < n_dofs; j++)
+                {
+                    // Integrand: v * ∂u/∂t *dx
+                    copy_data.cell_matrix(i,j) += fe_v.shape_value(i,p) * fe_v.shape_grad(i,p)[1] * JxW[p];
+
+                    // Integrand: - (1/2*u^2 * ∂u/∂x * dx)
+                    copy_data.cell_matrix(i,j) -= 0.5*burgers_flux(u_values[p]) * fe_v.shape_grad(i,p)[0] * JxW[p];
+                }
+            }
+        }
+    };
+
+    const auto boundary_worker = [&](const Iterator &cell, 
+                                    const unsigned int face_num, 
+                                    ScratchData<dim+1> &scratch_data, 
+                                    CopyData &copy_data)
+    {
+        scratch_data.fe_interface_values.reinit(cell, face_num);
+        const FEFaceValues<dim+1> &fe_face = scratch_data.fe_face_values;
+
+    };
+
+    // Face worker
+    const auto face_worker = [&]()
+    {
+        // TODO
+    };
+
+    // Copier
+    const auto copier = [&](const CopyData &copy_data)
+    {
+        // TODO
+    };
 
 }
 
