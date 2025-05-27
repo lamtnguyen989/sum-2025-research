@@ -47,9 +47,7 @@ class InitialCondition : public Function<dim>
 };
 
 /*
-    Define the BoundaryValues of the rectangular grid [a,b] x [0,T]:
-        - Initial Condition: sin(pi * x)
-        - Boundary condition (Dirichlet): u(a,t) = u(b,t) = 0
+    Define the Dirichlet Boundary Condition on spatial interval [a,b] as u(a,t) = u(b,t) = 0
 */
 template <int dim>
 class BoundaryValues : public Function<dim>
@@ -58,20 +56,6 @@ class BoundaryValues : public Function<dim>
         BoundaryValues() : Function<dim>() {};
         virtual double value(const Point<dim> &p, const unsigned int component) const override
         {
-            const double epsilon = 1e-10;   // Error needed to be consider a boundary point
-            // Boundary condtion 
-            if (std::abs(p[0] - 1.0) < epsilon || std::abs(p[0] + 1.0) < epsilon)
-            {
-                return 0.0;
-            }
-            
-            // Initial condition
-            if (std::abs(p[1]) < epsilon)
-            {
-                return std::sin(numbers::PI * p[0]);
-            }
-
-            // These should never be call for points outside of the boundary (the below line should never run)
             return 0.0;
         }
 };
@@ -107,8 +91,8 @@ struct ScratchData
                 scratch_data.fe_values.get_update_flags())
         , fe_face_values(scratch_data.fe_values.get_mapping(),
                     scratch_data.fe_values.get_fe(),
-                    scratch_data.fe_values.get_quadrature(),
-                    scratch_data.fe_values.get_update_flags())
+                    scratch_data.fe_face_values.get_quadrature(),
+                    scratch_data.fe_face_values.get_update_flags())
     {}
 };
 
@@ -116,6 +100,7 @@ struct ScratchData
 struct CopyDataFace
 {
     FullMatrix<double>                      cell_matrix;
+    Vector<double>                          cell_residual;
     std::vector<types::global_dof_index>    joint_dof_indices;
 };
 
@@ -145,7 +130,7 @@ template <int dim>
 class InviscidBurgersDG
 {
     public:
-        InviscidBurgersDG(unsigned int deg);
+        InviscidBurgersDG(const unsigned int deg);
         void run();
     private:
         void make_grid();
@@ -156,41 +141,41 @@ class InviscidBurgersDG
         void initial_condition();
         double burgers_flux(double u);
         double numerical_flux (double u_plus, double u_minus);
-    
-    // Systems components and data
-    Triangulation<dim+1>    triangulation;
-    const FE_DGQ<dim+1>     fe;
-    const MappingQ1<dim+1>  mapping;
-    const QGauss<dim+1>     quadrature;
-    const QGauss<dim>       face_quadrature;
-    DoFHandler<dim+1>       dof_handler;
-    SparsityPattern         sparsity_pattern;
-    SparseMatrix<double>    system_matrix;
-    Vector<double>          residual;   // right_hand_side for many code in the tutorials
-    Vector<double>          solution;
-
 
     // System parameters
+    unsigned int degree;            // degree of the solving system
     const double x_min, x_max;      // 1D spatial interval
     const double t_min, t_max;      // Time evolution
     unsigned int spatial_cells;     // Number of cells in spatial domain (most likely used as parameter for Grid's repetitions)
     unsigned int time_cells;        // Number of cells for spatial direction (again parameter for Grid's repetitions)
-    unsigned int degree;            // degree of the solving system
     double current_time;            // Time-tracking (hopefully can use this for intermediate solutions processing)
+
+    // Systems components and data
+    Triangulation<dim+1>    triangulation;
+    DoFHandler<dim+1>       dof_handler;
+    const FE_DGQ<dim+1>     fe;
+    const MappingQ1<dim+1>  mapping;
+    const QGauss<dim+1>     quadrature;
+    const QGauss<dim>       face_quadrature;
+    SparsityPattern         sparsity_pattern;
+    SparseMatrix<double>    system_matrix;
+    Vector<double>          residual;   // right_hand_side for many code in the tutorials
+    Vector<double>          solution;
 };
 
 
 // Constructor
 template <int dim>
-InviscidBurgersDG<dim>::InviscidBurgersDG(unsigned int deg):
+InviscidBurgersDG<dim>::InviscidBurgersDG(const unsigned int deg):
     degree(deg),
-    fe(degree),
-    dof_handler(triangulation),
     x_min(-1.0) , x_max(1.0),
     t_min(0.0) , t_max(1.0),
     spatial_cells(64),
     time_cells(32),
     current_time(0.0),
+    triangulation(),
+    dof_handler(triangulation),
+    fe(degree),
     quadrature(fe.tensor_degree() + 1),
     face_quadrature(fe.tensor_degree() + 1)
 {}
@@ -217,11 +202,9 @@ double InviscidBurgersDG<dim>::numerical_flux(double u_plus, double u_minus)
 template <int dim>
 void InviscidBurgersDG<dim>::initial_condition()
 {
-    AffineConstraints constraints;  // Empty constraints
-
     // Projecting the initial condition 
     VectorTools::project(dof_handler,
-                        constraints,
+                        AffineConstraints<double>(),
                         QGauss<dim+1>(degree+2),
                         InitialCondition<dim+1>(),
                         solution);
@@ -398,17 +381,23 @@ void InviscidBurgersDG<dim>::assemble_system()
                         face_worker);
 }
 
-// Solve
+// Solve using Newton-Raphson iteration
 template<int dim>
 void InviscidBurgersDG<dim>::solve()
 {
-    
+
 }
 
 template <int dim>
 void InviscidBurgersDG<dim>::output_data()
 {
-
+    DataOut<dim+1> data_out;
+    data_out.attach_dof_handler(dof_handler);
+    data_out.add_data_vector(solution, "u");
+    data_out.build_patches();
+    
+    std::ofstream output("burgers_solution.vtu");
+    data_out.write_vtu(output);
 }
 
 template <int dim>
@@ -423,7 +412,7 @@ void InviscidBurgersDG<dim>::run()
 int main()
 {
     try
-    {
+    {        
         const unsigned int degree = 1;
         InviscidBurgersDG<1> ivBurgersDG(degree);
         ivBurgersDG.run();
