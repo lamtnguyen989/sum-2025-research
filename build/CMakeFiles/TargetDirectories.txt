@@ -1,0 +1,10 @@
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/inviscid-burgers.dir
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/run.dir
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/debug.dir
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/release.dir
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/runclean.dir
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/distclean.dir
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/strip_comments.dir
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/info.dir
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/edit_cache.dir
+/home/overlord_max/summer-2025-research/server-files/build/CMakeFiles/rebuild_cache.dir
