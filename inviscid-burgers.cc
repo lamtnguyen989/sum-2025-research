@@ -149,7 +149,7 @@ class InviscidBurgersDG
         void output_data();
         void initial_condition();
         double burgers_flux(double u);
-        double numerical_flux (double u_plus, double u_minus);
+        double numerical_flux(double u_plus, double u_minus);
 
     // System parameters
     unsigned int degree;            // degree of the solving system
@@ -352,7 +352,7 @@ void InviscidBurgersDG<dim>::assemble_system()
             // Enforcing Boundary condition via the numerical flux
             const double u_plus = boundary_function.value(point);
             const double lambda = std::max(std::abs(u_plus), std::abs(u_minus[p]));
-            const double flux = numerical_flux(u_plus, u_minus[0]);
+            const double flux = numerical_flux(u_plus, u_minus[p]);
 
             // Face residual and Jacobians calculations
             // Note that Jacobian is obtained by acting [∂/∂u_minus] on the boundary residual
@@ -493,10 +493,13 @@ void InviscidBurgersDG<dim>::solve()
 
         SparseDirectUMFPACK solver;
         solver.initialize(system_matrix);
-        Vector<double> newton_update(residual.size());
-        solver.vmult(newton_update, residual);
+        Vector<double> update(residual.size());
+        Vector<double> neg_residual = residual;
+        neg_residual *= -1.0;
 
-        solution -= newton_update;
+        solver.vmult(update, neg_residual);
+
+        solution += update;
     }
 }
 
