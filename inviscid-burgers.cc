@@ -272,7 +272,7 @@ void InviscidBurgersDG<dim>::setup_system()
 template <int dim>
 void InviscidBurgersDG<dim>::assemble_system()
 {
-    using Iterator = typename DoFHandler<dim>::active_cell_iterator;
+    using Iterator = typename DoFHandler<dim+1>::active_cell_iterator;
     const BoundaryValues<dim+1> boundary_function;
 
     // Cell worker (Volume integrations)
@@ -282,7 +282,7 @@ void InviscidBurgersDG<dim>::assemble_system()
         copy_data.reinit(cell, n_dofs);
         scratch_data.fe_values.reinit(cell);
 
-        const auto &q_points = scratch_data.fe_values.get_quadrature_points();
+
         const FEValues<dim+1> &fe_v = scratch_data.fe_values;
         
         // Infinitesmal volume terms
@@ -413,15 +413,26 @@ void InviscidBurgersDG<dim>::assemble_system()
             const double num_flux = numerical_flux(u_plus[p], u_minus[p]);
             const double lambda = std::max(std::abs(u_plus[p]), std::abs(u_minus[p]));
 
+            // Numerical flux derivatives
+            const double dflux_du_minus = 0.5 * (u_minus[p] - lambda);
+            const double dflux_du_plus = 0.5 * (u_plus[p] - lambda);
+
             for (unsigned int i = 0; i < n_dofs_face; i++)
             {
-                // Residual integration: v_i * numerical_flux * ds
-                double v_i = fe_iv.shape_value(true, i, p);
-                copy_data_face.cell_residual(i) += v_i * num_flux * JxW[p];
+                // Residual integration: [v_i] * numerical_flux * ds; where [] is the jump operator
+                // For some reason jump_in_shape_values() method does not seems to work (aparently )
+                const double v_i_minus = fe_iv.shape_value(false, i, p);
+                const double v_i_plus = fe_iv.shape_value(true, i, p);
+                const double v_i_jump = v_i_minus - v_i_plus;
+
+                copy_data_face.cell_residual[i] += num_flux * v_i_jump * JxW[p];
 
                 for (unsigned int j = 0; j < n_dofs_face; j++)
                 {
-
+                    // Jacobian integration: [v_i] * (∂f*/∂u_minus * v_j_minus + ∂f*/∂u_plus * v_j_plus) * ds
+                    const double v_j_minus = fe_iv.shape_value(false, j, p);
+                    const double v_j_plus = fe_iv.shape_value(true, j, p);
+                    copy_data_face.cell_matrix(i,j) += v_i_jump * (dflux_du_minus*v_j_minus + dflux_du_plus*v_j_plus) * JxW[p];
                 }
             }
         }
@@ -451,7 +462,7 @@ void InviscidBurgersDG<dim>::assemble_system()
     ScratchData<dim+1>  scratch_data(mapping, fe, quadrature, face_quadrature);
     CopyData            copy_data;
 
-    MeshWorker::mesh_loop(dof_handler.active_cell_iterators(),
+    MeshWorker::mesh_loop(dof_handler.begin_active(), dof_handler.end(),
                         cell_worker,
                         copier,
                         scratch_data,
@@ -485,7 +496,10 @@ void InviscidBurgersDG<dim>::output_data()
 template <int dim>
 void InviscidBurgersDG<dim>::run()
 {
+    std::cout << "Running with deal.II version: " << DEAL_II_PACKAGE_VERSION << std::endl;
+
     make_grid();
+
     std::cout << "Grid made with: " << triangulation.n_active_cells() << " active cells." << std::endl;
 
     setup_system();
