@@ -42,8 +42,8 @@ class InitialCondition : public Function<dim>
 
         virtual double value(const Point<dim> &p, const unsigned int component=0) const override
         {
-            int zero = component - component;   //  This is here to shut up the compiler
-            return std::sin(numbers::PI * p[0]) + zero;
+            (void) component;   //  This is here to shut up the compiler
+            return std::sin(numbers::PI * p[0]);
         }
 };
 
@@ -57,8 +57,8 @@ class BoundaryValues : public Function<dim>
         BoundaryValues() : Function<dim>() {};
         virtual double value(const Point<dim> &p, const unsigned int component=0) const override
         {
-            int zero = component - component;   // Shut up the compiler
-            const double epsilon = 1e-10 + zero;    // Error needed to be consider a boundary point
+            (void) component;   // Shut up the compiler
+            const double epsilon = 1e-10;    // Error needed to be consider a boundary point
             // Boundary condtion 
             if (std::abs(p[0] - 1.0) < epsilon || std::abs(p[0] + 1.0) < epsilon)
             {
@@ -476,7 +476,28 @@ void InviscidBurgersDG<dim>::assemble_system()
 template<int dim>
 void InviscidBurgersDG<dim>::solve()
 {
+    const double epsilon = 1e-10;       // Tolerance for residual norm
+    const unsigned int max_iter = 20;   // Max Newton-Raphson iteration
 
+    for (unsigned int k = 0; k < max_iter; k++)
+    {
+        assemble_system();
+        const double residual_norm = residual.l2_norm();
+        std::cout << "Iteration: " << k+1 << ", residual norm: " << residual_norm << std::endl;
+
+        if (residual_norm < epsilon)
+        {
+            std::cout << "Solver converged!" << std::endl;
+            break;
+        }
+
+        SparseDirectUMFPACK solver;
+        solver.initialize(system_matrix);
+        Vector<double> newton_update(residual.size());
+        solver.vmult(newton_update, residual);
+
+        solution -= newton_update;
+    }
 }
 
 // Output to .vtu file
@@ -508,8 +529,9 @@ void InviscidBurgersDG<dim>::run()
     initial_condition();
     std::cout << "Initial condition applied." << std::endl;
 
-    assemble_system();
-    std::cout << "System assembled" << std::endl;
+    std::cout << "Starting solving system" << std::endl;
+
+    solve();
 
     output_data();
     std::cout << "Data written." << std::endl;
