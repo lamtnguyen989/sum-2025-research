@@ -40,9 +40,10 @@ class InitialCondition : public Function<dim>
     public:
         InitialCondition() : Function<dim>() {};
 
-        virtual double value(const Point<dim> &p, const unsigned int component = 0) const override
+        virtual double value(const Point<dim> &p, const unsigned int component=0) const override
         {
-            return std::sin(numbers::PI * p[0]);
+            int zero = component - component;   //  This is here to shut up the compiler
+            return std::sin(numbers::PI * p[0]) + zero;
         }
 };
 
@@ -54,12 +55,20 @@ class BoundaryValues : public Function<dim>
 {
     public:
         BoundaryValues() : Function<dim>() {};
-        virtual double value(const Point<dim> &p, const unsigned int component) const override
+        virtual double value(const Point<dim> &p, const unsigned int component=0) const override
         {
+            int zero = component - component;   // Shut up the compiler
+            const double epsilon = 1e-10 + zero;    // Error needed to be consider a boundary point
+            // Boundary condtion 
+            if (std::abs(p[0] - 1.0) < epsilon || std::abs(p[0] + 1.0) < epsilon)
+            {
+                return 0.0;
+            }
+
+            // These should never be call for points outside of the boundary (the below line should never run)
             return 0.0;
         }
 };
-
 /*
     Structs for MeshWorker
 */
@@ -68,7 +77,7 @@ struct ScratchData
 {
     // Data fields (Finite Elements)
     FEValues<spacetime_dim>             fe_values;
-    FEInterfaceValues<spacetime_dim>    fe_face_values;  
+    FEInterfaceValues<spacetime_dim>    fe_interface_values;  
 
     // Default constructor
     ScratchData(const MappingQ1<spacetime_dim> &mapping,
@@ -80,7 +89,7 @@ struct ScratchData
                 const UpdateFlags face_update_flags = update_values | update_gradients | update_normal_vectors |
                                                     update_quadrature_points | update_JxW_values):
         fe_values(mapping, fe, quadrature, update_flags),
-        fe_face_values(mapping, fe, face_quadrature, face_update_flags)
+        fe_interface_values(mapping, fe, face_quadrature, face_update_flags)
     {}
     
     // Copy constructor (needed for MeshWorker)
@@ -89,10 +98,10 @@ struct ScratchData
                 scratch_data.fe_values.get_fe(),
                 scratch_data.fe_values.get_quadrature(),
                 scratch_data.fe_values.get_update_flags())
-        , fe_face_values(scratch_data.fe_values.get_mapping(),
-                    scratch_data.fe_values.get_fe(),
-                    scratch_data.fe_face_values.get_quadrature(),
-                    scratch_data.fe_face_values.get_update_flags())
+        , fe_interface_values(scratch_data.fe_interface_values.get_mapping(),
+                    scratch_data.fe_interface_values.get_fe(),
+                    scratch_data.fe_interface_values.get_quadrature(),
+                    scratch_data.fe_interface_values.get_update_flags())
     {}
 };
 
@@ -202,10 +211,14 @@ double InviscidBurgersDG<dim>::numerical_flux(double u_plus, double u_minus)
 template <int dim>
 void InviscidBurgersDG<dim>::initial_condition()
 {
+    AffineConstraints<double> constraints;
+    constraints.clear();
+    constraints.close();
+
     // Projecting the initial condition 
     VectorTools::project(dof_handler,
-                        AffineConstraints<double>(),
-                        QGauss<dim+1>(degree+2),
+                        constraints,
+                        quadrature,
                         InitialCondition<dim+1>(),
                         solution);
 }
@@ -260,9 +273,9 @@ template <int dim>
 void InviscidBurgersDG<dim>::assemble_system()
 {
     using Iterator = typename DoFHandler<dim>::active_cell_iterator;
-    const BoundaryValues<dim> boundary_function;
+    const BoundaryValues<dim+1> boundary_function;
 
-    // Cell worker
+    // Cell worker (Volume integrations)
     const auto cell_worker = [&](const Iterator &cell, ScratchData<dim+1> &scratch_data, CopyData &copy_data)
     {
         const unsigned int n_dofs = scratch_data.fe_values.get_fe().n_dofs_per_cell();
@@ -272,7 +285,7 @@ void InviscidBurgersDG<dim>::assemble_system()
         const auto &q_points = scratch_data.fe_values.get_quadrature_points();
         const FEValues<dim+1> &fe_v = scratch_data.fe_values;
         
-        // volume terms
+        // Infinitesmal volume terms
         const std::vector<double> &JxW  = fe_v.get_JxW_values();
 
         // Get the u-values (solution) for the flux calculations
@@ -283,100 +296,167 @@ void InviscidBurgersDG<dim>::assemble_system()
         // Integrate over volume cells
         for (unsigned int p = 0; p < n_q_pts; p++)
         {
-            for (int i = 0; i < n_dofs; i++)
-            {
-                for (int j = 0; j < n_dofs; j++)
-                {
-                    // Integrand: v * ∂u/∂t * dxdt
-                    copy_data.cell_matrix(i,j) += fe_v.shape_value(i,p) * fe_v.shape_grad(i,p)[1] * JxW[p];
+            const double u = u_values[p];
 
-                    // Integrand: - (1/2*u^2 * ∂u/∂x * dxdt)
-                    copy_data.cell_matrix(i,j) -= 0.5*burgers_flux(u_values[p]) * fe_v.shape_grad(i,p)[0] * JxW[p];
+            for (unsigned int i = 0; i < n_dofs; i++)
+            {
+                // Computing test functions and both spacetime derivatives at the quadrature point
+                const double v_i = fe_v.shape_value(i,p);           // i-th Test function value
+                const double dv_i_dx = fe_v.shape_grad(i, p)[0];    // Spatial derivative
+                const double dv_i_dt = fe_v.shape_grad(i, p)[1];    // Time derivative
+
+                // Cell volume residual: integrating (v_i * ∂u/∂t * dxdt) - (1/2 * u^2 * ∂v_i/∂x * dxdt)
+                copy_data.cell_residual(i) += v_i * (u*dv_i_dt) * JxW[p];
+                copy_data.cell_residual(i) -= burgers_flux(u) * dv_i_dx * JxW[p];
+
+                // Cell Jacobian computation: ∂F(u)/∂u
+                // The integrand at the (i,j) grid point is: (v_i * ∂v_j/∂t * dxdt) - (u * v_i * ∂v_i/∂x * dxdt)
+                for (unsigned int j = 0; j < n_dofs; j++)
+                {
+                    const double v_j = fe_v.shape_value(j,p);             // j-th test fuction value 
+                    const double dv_j_dt = fe_v.shape_grad(j, p)[1];    // time derivative of j-th test fucntion   
+
+                    copy_data.cell_matrix(i,j) += v_i * dv_j_dt * JxW[p];
+                    copy_data.cell_matrix(i,j) -= u * v_j * dv_i_dx * JxW[p];
                 }
             }
         }
     };
 
+    // Boundary worker (Applying BC/ICs)
     const auto boundary_worker = [&](const Iterator &cell, 
-                                    const unsigned int face_num, 
+                                    const unsigned int face_number, 
                                     ScratchData<dim+1> &scratch_data, 
                                     CopyData &copy_data)
     {
-        scratch_data.fe_interface_values.reinit(cell, face_num);
-        const FEFaceValues<dim+1> &fe_face = scratch_data.fe_face_values;
+        // Getting the FEFaceValue of the cell from the (reinitialized) FEInterfaceValues
+        scratch_data.fe_interface_values.reinit(cell, face_number);
+        const FEFaceValuesBase<dim+1> &fe_face = scratch_data.fe_interface_values.get_fe_face_values(0);
 
-        const auto &q_points = fe_face.get_quadrature_points();
-        const unsigned int n_facet_dofs = fe_face.get_fe().n_dofs_per_cell();
-        const std::vector<double> &JxW = fe_face.get_fe().n_dofs_per_cell();
+        // Getting the number of quadrature points and collecting all volume terms on the face integration
+        const unsigned int n_q_pts = fe_face.n_quadrature_points;
+        const std::vector<double> &JxW = fe_face.get_JxW_values();
 
-        // u-values
-        unsigned int n_q_pts = fe_face.n_quadrature_points();
-        std::vector<double> u_values(n_q_pts);
-        fe_face.get_function_values(solution, u_values);
+        // Computing u_minus values
+        std::vector<double> u_minus(n_q_pts);
+        fe_face.get_function_values(solution, u_minus);
 
-        // Handling boundary points (TODO)
-        for (unsigned int p = 0; p < q_points.size(); p++)
+        // Integrating the boundary
+        for (unsigned int p = 0; p < n_q_pts; p++)
         {
-            // Applying the BC/IC
-            double boundary_value = boundary_function.value(q_points[p]);
+            // Skipping integration at initial condition points
+            Point<dim+1> point = fe_face.quadrature_point(p);
+            if (std::abs(point[1] - t_min) < 1e-10) 
+                continue;
 
-            // Get the coordinate and normal vector of the point
-            const Point<dim+1> pt = fe_face.quadrature_point(p);  
-            const Tensor<1, dim+1> normal = fe_face.normal_vector(p);
+            // Enforcing Boundary condition via the numerical flux
+            const double u_plus = boundary_function.value(point);
+            const double lambda = std::max(std::abs(u_plus), std::abs(u_minus[p]));
+            const double flux = numerical_flux(u_plus, u_minus[0]);
 
-            // Integrating the residual at the boundary
-            double flux = numerical_flux(u_values[p], boundary_value);
-            for (int i = 0; i < n_facet_dofs; i++)
+            // Face residual and Jacobians calculations
+            // Note that Jacobian is obtained by acting [∂/∂u_minus] on the boundary residual
+            for (unsigned int i = 0; i < fe_face.dofs_per_cell; i++)
             {
-                for (int j = 0; j < n_facet_dofs; j++)
+                // Residual integrand: numerical_flux * v_i * dxdt
+                const double v_i = fe_face.shape_value(i, p);
+                copy_data.cell_residual(i) -= flux * v_i * JxW[p];
+
+                for (unsigned int j = 0; j < fe_face.dofs_per_cell; j++)
                 {
-                    // Integrand: v * numericalflux(u_plus, u_minus) * ds
-                    copy_data.cell_matrix(i,j) += fe_face.shape_value(i,p) * numerical_flux(fe_face.shape_value(j,p), boundary_value) * JxW[p];
+                    // Jacobian integrand: v_i * u_minus/2*(1-lambda) * v_j * ds
+                    const double v_j = fe_face.shape_value(j, p);
+                    copy_data.cell_matrix(i,j) -= v_i * u_minus[p]/2 * (1-lambda) * v_j * JxW[p];
                 }
             }
         }
     };
 
-    // Face worker
+    // Face worker (interaction between neighboring cells)
     const auto face_worker = [&](const Iterator     &cell,
-                                 const unsigned int &f,
-                                 const unsigned int &sf,
-                                 const Iterator     &ncell,
-                                 const unsigned int &nf,
-                                 const unsigned int &nsf,
-                                 ScratchData<dim>   &scratch_data,
-                                 CopyData           &copy_data)
+                                const unsigned int  &f,
+                                const unsigned int  &sf,
+                                const Iterator      &ncell,
+                                const unsigned int  &nf,
+                                const unsigned int  &nsf,
+                                ScratchData<dim+1>  &scratch_data,
+                                CopyData            &copy_data)
     {
-        // TODO
+        // Getting the FEInterfaceValues object and reinitialize it
+        FEInterfaceValues<dim+1> &fe_iv = scratch_data.fe_interface_values;
+        fe_iv.reinit(cell, f, sf, ncell, nf, nsf);
+
+        // Getting number of quadrature points and volume elements as usual
+        const unsigned int n_q_pts = fe_iv.n_quadrature_points;
+        const std::vector<double> &JxW = fe_iv.get_JxW_values();
+
+        // Computing the u_plus and u_minus values
+        std::vector<double> u_minus(n_q_pts), u_plus(n_q_pts);
+        fe_iv.get_fe_face_values(0).get_function_values(solution, u_minus);
+        fe_iv.get_fe_face_values(1).get_function_values(solution, u_plus);  
+
+        // Setup copy_data for the faces
+        copy_data.face_data.emplace_back();
+        CopyDataFace &copy_data_face = copy_data.face_data.back();
+
+        // dofs on faces
+        const unsigned int n_dofs_face = fe_iv.n_current_interface_dofs();
+        copy_data_face.joint_dof_indices = fe_iv.get_interface_dof_indices();
+
+        // Reinitialize matrix and residuals
+        copy_data_face.cell_matrix.reinit(n_dofs_face, n_dofs_face);
+        copy_data_face.cell_residual.reinit(n_dofs_face);
+        
+        // Residual and Jacobian calculations for current and neighboring cells
+        for (unsigned int p = 0; p < n_q_pts; p++)
+        {
+            const double num_flux = numerical_flux(u_plus[p], u_minus[p]);
+            const double lambda = std::max(std::abs(u_plus[p]), std::abs(u_minus[p]));
+
+            for (unsigned int i = 0; i < n_dofs_face; i++)
+            {
+                // Residual integration: v_i * numerical_flux * ds
+                double v_i = fe_iv.shape_value(true, i, p);
+                copy_data_face.cell_residual(i) += v_i * num_flux * JxW[p];
+
+                for (unsigned int j = 0; j < n_dofs_face; j++)
+                {
+
+                }
+            }
+        }
     };
 
-    // Copier
-    const AffineConstraints<double> constraints;
-    const auto copier = [&](const CopyData &c)
+    // Copier (assembling local to global data)
+    const auto copier = [&](const CopyData &c) 
     {
+        AffineConstraints<double> constraints;
         constraints.distribute_local_to_global(c.cell_matrix,
                                             c.cell_residual,
                                             c.local_dof_indices,
                                             system_matrix,
                                             residual);
+ 
         for (const auto &cdf : c.face_data)
         {
             constraints.distribute_local_to_global(cdf.cell_matrix,
+                                                cdf.cell_residual,
                                                 cdf.joint_dof_indices,
-                                                system_matrix);
+                                                system_matrix,
+                                                residual);
         }
     };
 
     // MeshWorker Loop
     ScratchData<dim+1>  scratch_data(mapping, fe, quadrature, face_quadrature);
     CopyData            copy_data;
-    MeshWorker::mesh_loop(dof_handler.begin_active(), 
-                        dof_handler.end(), 
+
+    MeshWorker::mesh_loop(dof_handler.active_cell_iterators(),
                         cell_worker,
                         copier,
                         scratch_data,
                         copy_data,
-                        MeshWorker::assemble_own_cells | MeshWorker::assemble_boundary_faces |MeshWorker::assemble_own_interior_faces_once,
+                        MeshWorker::assemble_own_cells | MeshWorker::assemble_boundary_faces | MeshWorker::assemble_own_interior_faces_once,
                         boundary_worker,
                         face_worker);
 }
@@ -388,6 +468,7 @@ void InviscidBurgersDG<dim>::solve()
 
 }
 
+// Output to .vtu file
 template <int dim>
 void InviscidBurgersDG<dim>::output_data()
 {
@@ -396,6 +477,7 @@ void InviscidBurgersDG<dim>::output_data()
     data_out.add_data_vector(solution, "u");
     data_out.build_patches();
     
+    // Output to .vtu
     std::ofstream output("burgers_solution.vtu");
     data_out.write_vtu(output);
 }
@@ -403,7 +485,20 @@ void InviscidBurgersDG<dim>::output_data()
 template <int dim>
 void InviscidBurgersDG<dim>::run()
 {
+    make_grid();
+    std::cout << "Grid made with: " << triangulation.n_active_cells() << " active cells." << std::endl;
 
+    setup_system();
+    std::cout << "System done setting up." << std::endl;
+
+    initial_condition();
+    std::cout << "Initial condition applied." << std::endl;
+
+    assemble_system();
+    std::cout << "System assembled" << std::endl;
+
+    output_data();
+    std::cout << "Data written." << std::endl;
 }
 
 /*
