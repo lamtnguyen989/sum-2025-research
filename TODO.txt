@@ -1,12 +1,9 @@
-Finish:
-    setup_system()
-    assemble_system()
-    solve()
-    run()
-    ** Be sure to incorporate ICs and BCs to the solver
+Rewrite:
+    assemble_system():  be careful on how to handle BC and IC
+                        Work through the derivatives and residuals again to verify implementation
 
-After getting these sorted look into CMake and compile the file
+    Look into implementation of solve(), swtich over to SolverGMRES if needed
 
-URGENT:
-    Follow Step 12 of deal.II
-    Read up on Finite Elements and Discontinuous Galerkin
+    Interesting references:
+        https://www.dealii.org/workshop-2015/slides/hansel.pdf
+        
