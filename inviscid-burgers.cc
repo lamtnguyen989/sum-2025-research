@@ -27,7 +27,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <cmath>
+#include <string>
 
 using namespace dealii;
 
@@ -179,8 +179,8 @@ InviscidBurgersDG<dim>::InviscidBurgersDG(const unsigned int deg):
     degree(deg),
     x_min(-1.0) , x_max(1.0),
     t_min(0.0) , t_max(1.0),
-    spatial_cells(64),
-    time_cells(32),
+    spatial_cells(128),
+    time_cells(64),
     current_time(0.0),
     triangulation(),
     dof_handler(triangulation),
@@ -274,6 +274,7 @@ void InviscidBurgersDG<dim>::assemble_system()
 {
     using Iterator = typename DoFHandler<dim+1>::active_cell_iterator;
     const BoundaryValues<dim+1> boundary_function;
+    const InitialCondition<dim+1> initial_condition;
 
     // Cell worker (Volume integrations)
     const auto cell_worker = [&](const Iterator &cell, ScratchData<dim+1> &scratch_data, CopyData &copy_data)
@@ -317,7 +318,7 @@ void InviscidBurgersDG<dim>::assemble_system()
                     const double dv_j_dt = fe_v.shape_grad(j, p)[1];    // time derivative of j-th test fucntion   
 
                     copy_data.cell_matrix(i,j) += v_i * dv_j_dt * JxW[p];
-                    copy_data.cell_matrix(i,j) -= u * v_j * dv_i_dx * JxW[p];
+                    copy_data.cell_matrix(i,j) -= v_j * dv_i_dx * u * JxW[p];
                 }
             }
         }
@@ -483,7 +484,17 @@ void InviscidBurgersDG<dim>::solve()
     {
         assemble_system();
         const double residual_norm = residual.l2_norm();
-        std::cout << "Iteration: " << k+1 << ", residual norm: " << residual_norm << std::endl;
+        std::cout << "Iteration: " << k << ", residual norm: " << residual_norm << std::endl;
+
+        DataOut<dim+1> data_out;
+        data_out.attach_dof_handler(dof_handler);
+        data_out.add_data_vector(solution, "u");
+        data_out.build_patches();
+            
+        // Output to .vtu
+        std::string filename = "burgers_solution" + std::to_string(k) + ".vtu";
+        std::ofstream output(filename);
+        data_out.write_vtu(output);
 
         if (residual_norm < epsilon)
         {
@@ -492,13 +503,11 @@ void InviscidBurgersDG<dim>::solve()
         }
 
         SparseDirectUMFPACK solver;
+        Vector<double> update(dof_handler.n_dofs());
         solver.initialize(system_matrix);
-        Vector<double> update(residual.size());
-        Vector<double> neg_residual = residual;
-        neg_residual *= -1.0;
-
-        solver.vmult(update, neg_residual);
-
+        solver.vmult(update, residual);
+        double dampening = 0.1;
+        update *= dampening;
         solution += update;
     }
 }
