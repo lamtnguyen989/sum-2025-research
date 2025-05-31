@@ -59,6 +59,12 @@ class BoundaryValues : public Function<dim>
         {
             (void) component;   // Shut up the compiler
             const double epsilon = 1e-10;    // Error needed to be consider a boundary point
+
+            // Initial condition (at t=0)
+            if (std::abs(p[1]) < epsilon)
+            {
+                return std::sin(numbers::PI * p[0]);
+            }
             // Boundary condtion 
             if (std::abs(p[0] - 1.0) < epsilon || std::abs(p[0] + 1.0) < epsilon)
             {
@@ -207,7 +213,7 @@ double InviscidBurgersDG<dim>::numerical_flux(double u_plus, double u_minus)
 
 /*
     Initial condition for Burgers
-*/
+
 template <int dim>
 void InviscidBurgersDG<dim>::initial_condition()
 {
@@ -222,7 +228,7 @@ void InviscidBurgersDG<dim>::initial_condition()
                         InitialCondition<dim+1>(),
                         solution);
 }
-
+*/
 
 /*
     Making the grid with GridGenerator::subdivided_hyper_rectangle
@@ -286,7 +292,7 @@ void InviscidBurgersDG<dim>::assemble_system()
 
         const FEValues<dim+1> &fe_v = scratch_data.fe_values;
         
-        // Infinitesmal volume terms
+        // Infinitesmal volume (dx*dt) terms
         const std::vector<double> &JxW  = fe_v.get_JxW_values();
 
         // Get the u-values (solution) for the flux calculations
@@ -486,6 +492,7 @@ void InviscidBurgersDG<dim>::solve()
         const double residual_norm = residual.l2_norm();
         std::cout << "Iteration: " << k << ", residual norm: " << residual_norm << std::endl;
 
+        /* Printing for debugging */
         DataOut<dim+1> data_out;
         data_out.attach_dof_handler(dof_handler);
         data_out.add_data_vector(solution, "u");
@@ -538,8 +545,6 @@ void InviscidBurgersDG<dim>::run()
     setup_system();
     std::cout << "System done setting up." << std::endl;
 
-    initial_condition();
-    std::cout << "Initial condition applied." << std::endl;
 
     std::cout << "Starting solving system" << std::endl;
 
